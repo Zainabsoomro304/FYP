@@ -1,0 +1,9 @@
+Evaluation metrics (not training objectives)
+MSE                                           7.159721e-09
+RMSE                                          8.461513e-05
+Max absolute error                            1.887083e-04
+Physics loss (mean r^2) on evaluation grid    1.892445e-06
+Initial position error |x(0) - 1|             1.907349e-06
+Initial velocity error |x'(0) - 0|            1.055747e-05
+Final training physics loss (last epoch)      3.720365e-06
+Final training total loss (last epoch)        1.639411e-05
