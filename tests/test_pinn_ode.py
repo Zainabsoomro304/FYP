@@ -24,6 +24,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import main  # noqa: E402
+import training  # noqa: E402
 from physics import (analytical_solution, analytical_velocity,  # noqa: E402
                      classify_damping_regime, validate_physical_parameters)
 from pinn_model import PINN, compute_initial_condition_loss, compute_physics_residual  # noqa: E402
@@ -99,7 +100,7 @@ class TestValidation(unittest.TestCase):
         for overrides in [{"MASS": 0.0}, {"DAMPING_COEFFICIENT": -1.0},
                           {"TIME_END": 0.0}, {"N_COLLOCATION": 1}, {"NOT_A_SETTING": 1}]:
             with self.subTest(overrides), self.assertRaises((ValueError, KeyError)):
-                main.load_config(overrides)
+                training.load_config(overrides)
 
 
 class TestPINNLosses(unittest.TestCase):
@@ -136,24 +137,26 @@ class TestPINNLosses(unittest.TestCase):
         # At t = 13: x = 0.25, dx/dt = 2s * ds/dt = 0.5, d2x/dt2 = 2 * (1/2)^2 = 0.5
         model = self.square_model(t_min=10.0, t_max=14.0)
         t = torch.tensor([[13.0]], requires_grad=True)
-        x, v, a = main.predict_with_derivatives(model, t)
+        x, v, a = training.predict_with_derivatives(model, t)
         self.assertAlmostEqual(x.item(), 0.25, places=6)
         self.assertAlmostEqual(v.item(), 0.5, places=6)
         self.assertAlmostEqual(a.item(), 0.5, places=6)
 
     def test_training_never_uses_analytical_solution(self):
-        """If training touched the analytical solution, these mocks would raise."""
-        boom = mock.Mock(side_effect=AssertionError("analytical solution used in training!"))
+        """If training touched a reference solution, these mocks would raise."""
+        boom = mock.Mock(side_effect=AssertionError("reference solution used in training!"))
         with tempfile.TemporaryDirectory() as out:
-            cfg = main.load_config({"EPOCHS": 5, "PRINT_EVERY": 5, "DAMPING_COEFFICIENT": 0.5,
+            cfg = training.load_config({"EPOCHS": 5, "PRINT_EVERY": 5, "DAMPING_COEFFICIENT": 0.5,
                                     "ENABLE_TRAINING_VISUALIZATION": True, "VISUALIZATION_INTERVAL": 2,
                                     "TIME_START": 1.0, "TIME_END": 5.0, "OUTPUT_DIR": out})
             with mock.patch.object(main, "analytical_solution", boom), \
+                 mock.patch.object(main, "make_reference_solver", boom), \
                  mock.patch("physics.analytical_solution", boom), \
-                 mock.patch("physics.analytical_velocity", boom):
-                main.set_seed(0)
-                model = main.build_model(cfg)
-                history, best_epoch, snapshots = main.train_pinn(model, cfg)
+                 mock.patch("physics.analytical_velocity", boom), \
+                 mock.patch("physics.solve_reference_ode", boom):
+                training.set_seed(0)
+                model = training.build_model(cfg)
+                history, best_epoch, snapshots = training.train_pinn(model, cfg)
             self.assertEqual(len(history["total"]), 5)
             self.assertTrue(all(math.isfinite(v) for v in history["total"]))
             boom.assert_not_called()
@@ -167,12 +170,12 @@ class TestTrainingVisualization(unittest.TestCase):
             "VISUALIZATION_POINTS": 50, "N_COLLOCATION": 50, "DAMPING_COEFFICIENT": 0.3}
 
     def run_training(self, **overrides):
-        cfg = main.load_config(dict(self.BASE, **overrides))
-        main.set_seed(cfg.SEED)
-        model = main.build_model(cfg)
+        cfg = training.load_config(dict(self.BASE, **overrides))
+        training.set_seed(cfg.SEED)
+        model = training.build_model(cfg)
         untrained = copy.deepcopy(model)
         with contextlib.redirect_stdout(io.StringIO()):
-            history, best_epoch, snapshots = main.train_pinn(model, cfg)
+            history, best_epoch, snapshots = training.train_pinn(model, cfg)
         return cfg, model, untrained, history, best_epoch, snapshots
 
     def test_snapshot_epochs_are_adapted_to_training_length(self):
@@ -184,7 +187,7 @@ class TestTrainingVisualization(unittest.TestCase):
         cfg, _, untrained, _, _, snapshots = self.run_training(ENABLE_TRAINING_VISUALIZATION=True)
         first = snapshots[0]
         self.assertEqual((first["epoch"], first["kind"]), (0, "training"))
-        t_visual = main.make_visualization_points(cfg)
+        t_visual = training.make_visualization_points(cfg)
         with torch.no_grad():
             expected = untrained(t_visual).numpy().ravel()
         np.testing.assert_array_equal(first["x_pred"], expected)
@@ -200,7 +203,7 @@ class TestTrainingVisualization(unittest.TestCase):
                 EPOCHS=n, ENABLE_TRAINING_VISUALIZATION=False, KEEP_BEST_WEIGHTS=False)
             self.assertEqual(snaps_n, [])
             with torch.no_grad():
-                expected = model_n(main.make_visualization_points(cfg)).numpy().ravel()
+                expected = model_n(training.make_visualization_points(cfg)).numpy().ravel()
             np.testing.assert_allclose(by_epoch[n]["x_pred"], expected, rtol=0, atol=1e-6)
             np.testing.assert_allclose(history_vis["total"][:n], history_n["total"], rtol=1e-6)
 
@@ -214,25 +217,27 @@ class TestTrainingVisualization(unittest.TestCase):
         self.assertEqual(best["epoch"], best_epoch - 1)
         self.assertEqual(best["loss_total"], history["total"][best_epoch - 1])
         with torch.no_grad():   # model now holds the restored best weights
-            expected = model(main.make_visualization_points(cfg)).numpy().ravel()
+            expected = model(training.make_visualization_points(cfg)).numpy().ravel()
         np.testing.assert_array_equal(best["x_pred"], expected)
 
     def test_output_files_are_created(self):
         with tempfile.TemporaryDirectory() as out:
             with contextlib.redirect_stdout(io.StringIO()):
                 main.main(dict(self.BASE, ENABLE_TRAINING_VISUALIZATION=True, OUTPUT_DIR=out))
-            for name in ["solution_comparison.png", "training_losses.png", "absolute_error.png",
-                         "physics_residual.png", "metrics.json", "training_snapshots.png",
-                         "solution_evolution.gif"]:
-                self.assertTrue(os.path.getsize(os.path.join(out, name)) > 0, name)
+            run_dir = os.path.join(out, "physics_only")
+            for name in ["duffing_solution_comparison.png", "duffing_training_losses.png",
+                         "duffing_absolute_error.png", "physics_residual.png", "metrics.json",
+                         "training_snapshots.png", "solution_evolution.gif"]:
+                self.assertTrue(os.path.getsize(os.path.join(run_dir, name)) > 0, name)
 
     def test_disabled_visualization_creates_no_extra_files(self):
         with tempfile.TemporaryDirectory() as out:
             with contextlib.redirect_stdout(io.StringIO()):
                 main.main(dict(self.BASE, ENABLE_TRAINING_VISUALIZATION=False, OUTPUT_DIR=out))
-            self.assertTrue(os.path.exists(os.path.join(out, "metrics.json")))
-            self.assertFalse(os.path.exists(os.path.join(out, "training_snapshots.png")))
-            self.assertFalse(os.path.exists(os.path.join(out, "solution_evolution.gif")))
+            run_dir = os.path.join(out, "physics_only")
+            self.assertTrue(os.path.exists(os.path.join(run_dir, "metrics.json")))
+            self.assertFalse(os.path.exists(os.path.join(run_dir, "training_snapshots.png")))
+            self.assertFalse(os.path.exists(os.path.join(run_dir, "solution_evolution.gif")))
 
 
 if __name__ == "__main__":

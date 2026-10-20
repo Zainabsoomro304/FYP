@@ -6,13 +6,14 @@ Shows how the PINN's predicted curve evolves during training.
 
 How it works
 ------------
-1. DURING training (train_pinn() in main.py) the current network is evaluated
-   on a fixed time grid at selected epochs, and only the resulting prediction
-   array plus the loss values are stored ("snapshots"). No weights are copied,
-   nothing is retrained, and the model parameters are not modified.
-2. AFTER training, the analytical solution is computed once on the same grid
-   (for plotting and RMSE only -- it is never part of the training loss), and
-   the snapshots are turned into a static figure and an animation.
+1. DURING training (train_pinn() in training.py) the current network is
+   evaluated on a fixed time grid at selected epochs, and only the resulting
+   prediction array plus the loss values are stored ("snapshots"). No weights
+   are copied, nothing is retrained, and the model parameters are not modified.
+2. AFTER training, the caller supplies a reference solution (the numerical
+   SciPy solution), which is evaluated once on the same grid for plotting and
+   RMSE only -- it is never part of the training loss -- and the snapshots are
+   turned into a static figure and an animation.
 
 Epoch convention used in every snapshot: "epoch N" = the weights after N
 optimizer updates. Epoch 0 is the randomly initialised, untrained network.
@@ -28,7 +29,6 @@ from matplotlib import animation
 import numpy as np
 import torch
 
-from physics import analytical_solution
 
 # Epochs that are always captured (if they are <= EPOCHS).
 MILESTONE_EPOCHS = [0, 1, 10, 100, 500, 1000, 2500, 5000, 7500]
@@ -38,7 +38,7 @@ LOSS_FLOOR = 1e-16               # zero or non-finite losses are drawn at this v
 
 
 # ----------------------------------------------------------------------------
-# Snapshot capture (called from the training loop; no analytical solution here)
+# Snapshot capture (called from the training loop; no reference solution here)
 # ----------------------------------------------------------------------------
 def select_snapshot_epochs(total_epochs, interval):
     """Set of epochs (= number of optimizer updates) at which to take a snapshot."""
@@ -103,10 +103,10 @@ def _snapshot_title(snap):
     return f"Epoch {snap['epoch']}"
 
 
-def _y_limits(x_exact, snapshots):
-    """Fixed y-range: the analytical curve plus the predictions, but never more
-    than ~3x the analytical range so a wild untrained curve can't squash the plot."""
-    lo, hi = float(np.min(x_exact)), float(np.max(x_exact))
+def _y_limits(x_reference, snapshots):
+    """Fixed y-range: the reference curve plus the predictions, but never more
+    than ~3x the reference range so a wild untrained curve can't squash the plot."""
+    lo, hi = float(np.min(x_reference)), float(np.max(x_reference))
     span = max(hi - lo, 1e-6)
     pred_lo = min(float(np.min(s["x_pred"])) for s in snapshots)
     pred_hi = max(float(np.max(s["x_pred"])) for s in snapshots)
@@ -124,7 +124,7 @@ def _info_text(snap, rmse):
 # ----------------------------------------------------------------------------
 # Static figure
 # ----------------------------------------------------------------------------
-def plot_training_snapshots(t, x_exact, snapshots, rmse_by_id, cfg, subtitle):
+def plot_training_snapshots(t, x_reference, snapshots, rmse_by_id, cfg, subtitle, output_dir):
     """training_snapshots.png: one panel per milestone epoch + final + best."""
     training = [s for s in snapshots if s["kind"] == "training" and s["epoch"] in MILESTONE_EPOCHS]
     chosen = training + [s for s in snapshots if s["kind"] in ("final", "best")]
@@ -133,10 +133,10 @@ def plot_training_snapshots(t, x_exact, snapshots, rmse_by_id, cfg, subtitle):
     n_rows = math.ceil(len(chosen) / n_cols)
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.2 * n_cols, 3.2 * n_rows),
                              sharex=True, sharey=True, squeeze=False)
-    y_lo, y_hi = _y_limits(x_exact, chosen)
+    y_lo, y_hi = _y_limits(x_reference, chosen)
 
     for ax, snap in zip(axes.flat, chosen):
-        ax.plot(t, x_exact, "k-", lw=1.8, label="Analytical")
+        ax.plot(t, x_reference, "k-", lw=1.8, label="Reference")
         ax.plot(t, snap["x_pred"], "--", color="tab:red", lw=1.6, label="PINN")
         ax.set_title(f"{_snapshot_title(snap)}\nRMSE = {rmse_by_id[id(snap)]:.2e} m, "
                      f"loss = {snap['loss_total']:.2e}", fontsize=8.5)
@@ -153,7 +153,7 @@ def plot_training_snapshots(t, x_exact, snapshots, rmse_by_id, cfg, subtitle):
     fig.suptitle("PINN prediction at different training epochs (epoch N = after N optimizer updates)\n"
                  + subtitle, fontsize=10)
     fig.tight_layout()
-    path = os.path.join(cfg.OUTPUT_DIR, "training_snapshots.png")
+    path = os.path.join(output_dir, "training_snapshots.png")
     fig.savefig(path, dpi=120)
     plt.close(fig)
     return path
@@ -162,7 +162,8 @@ def plot_training_snapshots(t, x_exact, snapshots, rmse_by_id, cfg, subtitle):
 # ----------------------------------------------------------------------------
 # Animation
 # ----------------------------------------------------------------------------
-def save_solution_animation(t, x_exact, snapshots, rmse_by_id, history, cfg, subtitle):
+def save_solution_animation(t, x_reference, snapshots, rmse_by_id, history, cfg, subtitle,
+                            output_dir):
     """Left: solution curve evolving. Right: loss history revealed up to that epoch.
 
     Returns (path or None, message).
@@ -191,10 +192,10 @@ def save_solution_animation(t, x_exact, snapshots, rmse_by_id, history, cfg, sub
                                           gridspec_kw={"width_ratios": [1.25, 1]})
 
     # Left panel: analytical curve drawn ONCE and never changed.
-    ax_sol.plot(t, x_exact, "k-", lw=2, label="Analytical (fixed)")
+    ax_sol.plot(t, x_reference, "k-", lw=2, label="Reference (fixed)")
     (pred_line,) = ax_sol.plot(t, frames[0]["x_pred"], "--", color="tab:red", lw=2,
                                label="PINN prediction")
-    ax_sol.set_ylim(*_y_limits(x_exact, frames))
+    ax_sol.set_ylim(*_y_limits(x_reference, frames))
     ax_sol.set_xlabel("Time t [s]")
     ax_sol.set_ylabel("Position x [m]")
     ax_sol.grid(True, alpha=0.3)
@@ -238,12 +239,12 @@ def save_solution_animation(t, x_exact, snapshots, rmse_by_id, history, cfg, sub
     message = ""
     try:
         if cfg.ANIMATION_FORMAT == "mp4" and animation.writers.is_available("ffmpeg"):
-            path = os.path.join(cfg.OUTPUT_DIR, "solution_evolution.mp4")
+            path = os.path.join(output_dir, "solution_evolution.mp4")
             anim.save(path, writer=animation.FFMpegWriter(fps=fps))
         else:
             if cfg.ANIMATION_FORMAT == "mp4":
                 message = "ffmpeg not found, so MP4 export is unavailable; saved a GIF instead. "
-            path = os.path.join(cfg.OUTPUT_DIR, "solution_evolution.gif")
+            path = os.path.join(output_dir, "solution_evolution.gif")
             anim.save(path, writer=animation.PillowWriter(fps=fps))
         message += f"Animation saved: {path} ({len(frames)} frames)"
     except Exception as error:                     # missing Pillow/encoder, disk problems, ...
@@ -258,21 +259,25 @@ def save_solution_animation(t, x_exact, snapshots, rmse_by_id, history, cfg, sub
 # ----------------------------------------------------------------------------
 # Entry point used by main.py after training
 # ----------------------------------------------------------------------------
-def create_training_visualizations(snapshots, history, cfg, subtitle):
-    """Make training_snapshots.png and the animation. Returns info for metrics.json."""
-    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
-    t = make_visualization_points(cfg).numpy().ravel()
+def create_training_visualizations(snapshots, history, cfg, subtitle, reference_position,
+                                   output_dir):
+    """Make training_snapshots.png and the animation. Returns info for metrics.json.
 
-    # The analytical solution is computed once here, AFTER training, for plotting
+    reference_position: function t (NumPy array) -> reference positions [m].
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    t = make_visualization_points(cfg).numpy().ravel().astype(np.float64)
+
+    # The reference solution is computed once here, AFTER training, for plotting
     # and RMSE only. It stays fixed for every frame.
-    x_exact = analytical_solution(t, cfg.MASS, cfg.SPRING_CONSTANT, cfg.DAMPING_COEFFICIENT,
-                                  cfg.INITIAL_POSITION, cfg.INITIAL_VELOCITY, cfg.TIME_START)
-    rmse_by_id = {id(s): float(np.sqrt(np.mean((s["x_pred"] - x_exact) ** 2))) for s in snapshots}
+    x_reference = reference_position(t)
+    rmse_by_id = {id(s): float(np.sqrt(np.mean((s["x_pred"] - x_reference) ** 2))) for s in snapshots}
 
-    snapshot_path = plot_training_snapshots(t, x_exact, snapshots, rmse_by_id, cfg, subtitle)
+    snapshot_path = plot_training_snapshots(t, x_reference, snapshots, rmse_by_id, cfg, subtitle,
+                                            output_dir)
     print(f"Snapshot figure saved: {snapshot_path}")
-    animation_path, message = save_solution_animation(t, x_exact, snapshots, rmse_by_id,
-                                                      history, cfg, subtitle)
+    animation_path, message = save_solution_animation(t, x_reference, snapshots, rmse_by_id,
+                                                      history, cfg, subtitle, output_dir)
     print(message)
 
     return {

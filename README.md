@@ -1,19 +1,30 @@
-# Solving a Second-Order ODE with a Physics-Informed Neural Network (PINN)
+# Physics-Informed Neural Networks (PINNs) for a Nonlinear Oscillator
 
-This project trains a small neural network to solve the (optionally damped)
-mass–spring equation
+This project trains a small neural network to solve the **Duffing oscillator**
 
 $$
-m\,x''(t) + c\,x'(t) + k\,x(t) = 0,\qquad x(t_0)=x_0,\qquad x'(t_0)=v_0,\qquad t\in[t_0,t_{\text{end}}]
+m\,x''(t) + c\,x'(t) + k\,x(t) + \alpha\,x(t)^3 = 0,\qquad x(t_0)=x_0,\qquad x'(t_0)=v_0,\qquad t\in[t_0,t_{\text{end}}]
 $$
 
-**without ever showing it the answer.** The network learns only from the
-equation and the two initial conditions. The analytical solution (in
-`physics.py`) is used afterwards, only to measure how well it did.
+and, in a second experiment, uses a PINN to **estimate an unknown damping
+coefficient** $c$ from measured positions.
 
-The default configuration ($m=k=1$, $c=0$, $x_0=1$, $v_0=0$, $t\in[0,2\pi]$)
-is the original harmonic oscillator $x''+x=0$ with exact solution $\cos(t)$.
-Sections 1–10 below explain the method using that default case.
+The cubic term $\alpha x^3$ is a nonlinear spring. With $\alpha>0$ the
+spring gets stiffer the more it is stretched, which is why there is no
+closed-form solution any more. With `NONLINEAR_COEFFICIENT = 0` the equation
+is the linear mass–spring(–damper) equation from earlier versions of this
+project, and everything still works for it.
+
+There are two experiments:
+
+| | **Mode A: `physics_only`** | **Mode B: `damping_estimation`** |
+|---|---|---|
+| Knows | all parameters, incl. $c$ | $m$, $k$, $\alpha$, $x_0$, $v_0$; **not** $c$ |
+| Training loss | $\lambda_f L_\text{physics} + \lambda_{IC} L_{IC}$ | $\lambda_f L_\text{physics}(c_\text{est}) + \lambda_{IC} L_{IC} + \lambda_d L_\text{data}$ |
+| Learns | network weights | network weights **and** $c_\text{est}$ |
+| Uses measurements? | **never** | `N_OBSERVATION_POINTS` positions |
+| Compared afterwards with | SciPy numerical reference | SciPy reference + hidden true $c$ |
+| Output folder | `outputs/physics_only/` | `outputs/damping_estimation/` |
 
 ---
 
@@ -21,137 +32,193 @@ Sections 1–10 below explain the method using that default case.
 
 ```bash
 pip install -r requirements.txt
-python main.py
+python main.py                              # runs EXPERIMENT_MODE from config.py
+python main.py --mode physics_only          # Mode A
+python main.py --mode damping_estimation    # Mode B
+python main.py --mode physics_only --epochs 2000   # quick, less accurate run
 ```
 
-Runs on a normal CPU (no GPU needed). Expect roughly 30 s – 2 min depending on
-your computer. Results appear in `outputs/`.
+Runs on a normal CPU (no GPU needed). With the default 10,000 epochs each
+mode takes about 2 minutes.
 
-Run the unit tests (a few seconds; no full training):
+Unit tests (about 1.5 minutes; only short smoke-training):
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
+The full damping-recovery test (10,000 epochs) is skipped unless you set
+`RUN_SLOW_TESTS=1` (PowerShell: `$env:RUN_SLOW_TESTS = "1"`).
+
 ## What to edit (all in `config.py`)
 
 | To change… | Edit |
 |---|---|
-| Mass [kg] | `MASS` (> 0) |
-| Spring constant [N/m] | `SPRING_CONSTANT` (> 0) |
-| Damping [N·s/m] | `DAMPING_COEFFICIENT` (>= 0) |
+| Which experiment runs | `EXPERIMENT_MODE` (`"physics_only"` or `"damping_estimation"`) or `--mode` |
+| Mass [kg], spring constant [N/m] | `MASS`, `SPRING_CONSTANT` (both > 0) |
+| **Nonlinear (cubic) coefficient** [N/m³] | `NONLINEAR_COEFFICIENT` (0 = linear spring) |
+| Damping in Mode A [N·s/m] | `DAMPING_COEFFICIENT` (>= 0) |
+| **True damping for Mode B's synthetic data** | `TRUE_DAMPING_COEFFICIENT` |
+| **Starting guess for the estimate** | `INITIAL_DAMPING_ESTIMATE` (> 0) |
+| **Number of measurements** | `N_OBSERVATION_POINTS` |
+| **Measurement noise** | `ADD_OBSERVATION_NOISE`, `OBSERVATION_NOISE_STD` [m] (seeded with `SEED`) |
+| **Loss weights** | `LAMBDA_PHYSICS`, `LAMBDA_IC`, `LAMBDA_DATA` (Mode B only) |
 | Initial position [m] / velocity [m/s] | `INITIAL_POSITION`, `INITIAL_VELOCITY` |
-| Simulation interval [s] | `TIME_START`, `TIME_END` (e.g. `10 * math.pi`) |
-| Collocation / evaluation points | `N_COLLOCATION` (e.g. 50, 200, 500, 1000), `N_EVALUATION_POINTS` |
+| Simulation interval [s] | `TIME_START`, `TIME_END` |
+| Collocation / evaluation points | `N_COLLOCATION`, `N_EVALUATION_POINTS` |
+| Reference solver accuracy | `REFERENCE_SOLVER_METHOD`, `REFERENCE_RTOL`, `REFERENCE_ATOL` |
 | Network & optimiser | `HIDDEN_SIZE`, `NUM_HIDDEN_LAYERS`, `EPOCHS`, `LEARNING_RATE`, `SEED` |
-| Loss weights | `LAMBDA_PHYSICS`, `LAMBDA_IC` |
 | Best-weights restore | `KEEP_BEST_WEIGHTS` |
 | Time-input scaling | `NORMALIZE_TIME_INPUT` (see below) |
 | Training animation / snapshots | `ENABLE_TRAINING_VISUALIZATION`, `VISUALIZATION_INTERVAL`, `VISUALIZATION_POINTS`, `ANIMATION_INTERVAL_MS`, `ANIMATION_FORMAT` |
 
-Damping regimes, with critical damping $c_\text{crit}=2\sqrt{mk}$
-(= 2.0 when $m=k=1$):
-
-| Regime | Condition | Example (m = k = 1) |
-|---|---|---|
-| Undamped | $c=0$ | `DAMPING_COEFFICIENT = 0.0` |
-| Underdamped | $0<c<2\sqrt{mk}$ | `DAMPING_COEFFICIENT = 0.4` |
-| Critically damped | $c=2\sqrt{mk}$ | `DAMPING_COEFFICIENT = 2.0` |
-| Overdamped | $c>2\sqrt{mk}$ | `DAMPING_COEFFICIENT = 5.0` |
+The loss weights are starting choices for experiments, not universal
+constants. A larger `LAMBDA_DATA` makes the curve follow the measurements more
+closely, which also makes it follow their noise. A larger `LAMBDA_PHYSICS`
+trusts the equation more.
 
 To run other configurations from a script without editing `config.py`:
 
 ```python
 import main
-main.main({"DAMPING_COEFFICIENT": 0.4, "TIME_END": 20.0, "OUTPUT_DIR": "outputs_underdamped"})
+main.main({"EXPERIMENT_MODE": "damping_estimation", "TRUE_DAMPING_COEFFICIENT": 0.5,
+           "OUTPUT_DIR": "outputs_c05"})
 ```
+
+Damping regimes of the linear part, with $c_\text{crit}=2\sqrt{mk}$ (= 2.0 when
+$m=k=1$): undamped $c=0$, underdamped $0<c<c_\text{crit}$, critically damped
+$c=c_\text{crit}$, overdamped $c>c_\text{crit}$. With $\alpha\neq0$ these
+labels only describe the small-amplitude behaviour.
 
 **`NORMALIZE_TIME_INPUT`** (default `False` = the original network): when
 `True`, the network maps time from $[t_0, t_\text{end}]$ to $[-1,1]$ as its
-first operation, which keeps `tanh` inputs small for a large `TIME_START`.
-Because the scaling happens inside the network, autograd still returns
-derivatives with respect to the physical time in seconds. In our tests it did
-**not** fix long intervals (both settings failed at $10\pi$) and was slightly
-less accurate on $[0,2\pi]$ (RMSE 1.7e-4 vs 8.5e-5), so it is off by default.
+first operation. Autograd still returns derivatives with respect to the
+physical time. In earlier tests it did not fix long intervals and was slightly
+less accurate on $[0,2\pi]$, so it is off by default.
 
-## The analytical solution (validation only)
+## The numerical reference solution (validation only)
 
-With $\tau=t-t_0$, $\omega_n=\sqrt{k/m}$, $\zeta=c/(2\sqrt{mk})$:
+There is no closed-form solution for $\alpha\neq0$, so `solve_reference_ode()`
+in `physics.py` computes one with `scipy.integrate.solve_ivp`. The
+second-order ODE is rewritten as a first-order system in $(x, v)$:
 
-* **Undamped** ($c=0$): $x=x_0\cos\omega_n\tau+\frac{v_0}{\omega_n}\sin\omega_n\tau$
-* **Underdamped**: $x=e^{-\zeta\omega_n\tau}\left[x_0\cos\omega_d\tau+\frac{v_0+\zeta\omega_n x_0}{\omega_d}\sin\omega_d\tau\right]$, with $\omega_d=\omega_n\sqrt{1-\zeta^2}$
-* **Critically damped**: $x=\left[x_0+(v_0+\omega_n x_0)\tau\right]e^{-\omega_n\tau}$
-* **Overdamped**: $x=Ae^{r_1\tau}+Be^{r_2\tau}$, $r_{1,2}=-\zeta\omega_n\pm\omega_n\sqrt{\zeta^2-1}$, $A=\frac{v_0-r_2x_0}{r_1-r_2}$, $B=\frac{r_1x_0-v_0}{r_1-r_2}$
+$$
+x' = v,\qquad v' = -\frac{c\,v + k\,x + \alpha\,x^3}{m}
+$$
 
-"Critically damped" is detected with a relative tolerance of $10^{-9}$ on
-$c = 2\sqrt{mk}$. Invalid parameters raise `ValueError`, and a non-finite
-result raises an error rather than returning wrong numbers. `pinn_model.py`
-never imports `physics.py`, and the training loss (`compute_training_losses()`
-in `main.py`) contains only the physics residual and the initial conditions.
-A unit test checks that training runs with the analytical functions disabled.
+The default method is DOP853 (8th-order Runge–Kutta) with `rtol = 1e-10` and
+`atol = 1e-12`. This is a very accurate **numerical approximation**, not an
+exact formula. If the solver fails (for example a negative $\alpha$ with a
+large amplitude, which blows up in finite time), it raises `RuntimeError` with
+SciPy's message instead of returning bad numbers.
+
+For $\alpha=0$ the closed-form `analytical_solution()` is still available. Mode A
+then also reports `reference_vs_analytical_max_abs_diff_m`, which was
+1.9e-10 m in testing.
+
+## The unknown-damping experiment (Mode B) in detail
+
+1. **Synthetic measurements.** The reference solver is run with
+   `TRUE_DAMPING_COEFFICIENT` at `N_OBSERVATION_POINTS` evenly spaced times.
+   Optional Gaussian noise (seeded with `SEED`) is added. The data are saved
+   to `observations.csv` (time, observed position, noise-free position).
+2. **What the model gets.** A copy of the configuration with
+   `TRUE_DAMPING_COEFFICIENT` and `DAMPING_COEFFICIENT` **removed**
+   (`make_known_parameter_config()`), the observation times and positions, and
+   the known parameters and initial conditions. Any accidental use of the true
+   value inside training would therefore crash, and a unit test checks this.
+3. **Trainable damping.** `TrainableDampingPINN` (in `pinn_model.py`) adds one
+   parameter `raw_damping` with $c_\text{est}=\text{softplus}(\text{raw})>0$.
+   Negative damping would mean the system gains energy, and softplus keeps the
+   estimate positive while staying smooth for gradients. The model starts at
+   `INITIAL_DAMPING_ESTIMATE`, and Adam updates `raw_damping` together with the
+   weights.
+4. **How the losses work together.** $L_\text{physics}$ (with $c_\text{est}$)
+   asks for a curve that obeys the equation, $L_{IC}$ fixes its start, and
+   $L_\text{data}$ asks it to pass through the measurements. The only way to
+   satisfy all three is for $c_\text{est}$ to approach the damping that
+   produced the data.
+5. **Evaluation (after training only).** The estimate is compared with the
+   hidden true value (absolute and relative error), and the trained curve with
+   the reference solution and the measurements.
+
+A small training loss alone does not prove $c$ was identified. The report
+always shows the coefficient error and the position errors.
+
+## Results (actually run, 10,000 epochs, default settings, CPU)
+
+| Run | Key results |
+|---|---|
+| Mode A, Duffing ($\alpha=0.2$, $c=0$, $[0,10]$ s) | RMSE 3.1e-3 m, max error 6.8e-3 m, IC errors < 4e-5 |
+| Mode A, Duffing, only 3,000 epochs | RMSE 0.44 m: **not converged** (why the default is 10,000) |
+| Mode A, linear check ($\alpha=0$, $[0,2\pi]$) | RMSE 8.46e-5 m: same as the original project |
+| Mode B, clean data (true $c=0.3$, start 0.8) | **$c_\text{est}=0.30048$**, rel. error 0.16%; RMSE vs reference 3.5e-4 m; data MSE 1.2e-7 m² |
+| Mode B, noisy data (std 0.01 m) | **$c_\text{est}=0.30119$**, rel. error 0.40%; RMSE vs reference 2.0e-3 m; data MSE 5.2e-5 m² |
+
+These come from a single seed and one set of settings. Different settings
+(fewer or badly placed observations, much more noise, a longer interval, other
+loss weights) can give worse estimates. Always check
+`damping_relative_error` and `rmse_position_m` in `metrics.json`.
+
+## Output files
+
+```text
+outputs/physics_only/                outputs/damping_estimation/
+├── duffing_solution_comparison.png  ├── duffing_solution_comparison.png
+├── duffing_absolute_error.png       ├── duffing_absolute_error.png
+├── duffing_training_losses.png      ├── duffing_training_losses.png   (incl. data loss)
+├── physics_residual.png             ├── physics_residual.png
+├── training_snapshots.png  (*)      ├── damping_estimation_history.png
+├── solution_evolution.gif  (*)      ├── damping_observations.png
+└── metrics.json                     ├── observations.csv
+                                     ├── training_snapshots.png  (*)
+                                     ├── solution_evolution.gif  (*)
+                                     └── metrics.json
+(*) only if ENABLE_TRAINING_VISUALIZATION = True
+```
 
 ## Training visualization: watching the PINN learn
 
-With `ENABLE_TRAINING_VISUALIZATION = True` (section 4 of `config.py`), the
-project also saves:
+With `ENABLE_TRAINING_VISUALIZATION = True`, each experiment also saves
+`training_snapshots.png` and `solution_evolution.gif` (or `.mp4` if ffmpeg is
+installed and `ANIMATION_FORMAT = "mp4"`; otherwise it falls back to GIF).
+They show the real network's prediction at epochs 0, 1, 10, 100, 500, 1000,
+2500, 5000, 7500 (those ≤ `EPOCHS`), every `VISUALIZATION_INTERVAL` epochs,
+the final epoch, and the restored best weights (green title), against the
+fixed reference curve. `ANIMATION_INTERVAL_MS` only sets playback speed.
 
-* **`outputs/training_snapshots.png`**: one panel per milestone epoch
-  (0, 1, 10, 100, 500, 1000, 2500, 5000, 7500, whichever are ≤ `EPOCHS`), plus
-  the final epoch and the restored best weights. Each panel shows the PINN
-  against the analytical curve, with RMSE and loss.
-* **`outputs/solution_evolution.gif`** (or `.mp4`): an animation. On the left,
-  the PINN curve (red dashed) moves while the analytical curve (black) stays
-  fixed; the title shows the epoch, the weighted total loss, the physics and IC
-  losses, and the RMSE. On the right, the loss curves are drawn up to the
-  current epoch. The last frames show the final weights and then the restored
-  best weights (green title), so the two are never confused.
-
-| Setting | Meaning |
-|---|---|
-| `ENABLE_TRAINING_VISUALIZATION` | `False` = training exactly as before, no extra files |
-| `VISUALIZATION_INTERVAL` | snapshot every N epochs (plus the milestones above) |
-| `VISUALIZATION_POINTS` | time points per snapshot curve |
-| `ANIMATION_INTERVAL_MS` | delay between animation frames (playback speed only, not training) |
-| `ANIMATION_FORMAT` | `"gif"` (Pillow, always available) or `"mp4"` (needs ffmpeg; falls back to GIF) |
-
-**What "epoch N" means in the snapshots:** the weights after N optimizer
-updates. Epoch 0 is the real, randomly initialised network before any update.
-The training log and `best_epoch` in `metrics.json` count loop iterations
-instead (iteration N sees the weights after N − 1 updates), so the best
-weights logged as "epoch 9915" appear in the snapshots as epoch 9914.
-
-**How snapshots are captured.** Inside the training loop, at each snapshot
-epoch, the current network is evaluated once on a fixed grid under
-`model.eval()` + `torch.no_grad()`. Only that prediction array and the loss
-values already computed in that iteration are stored. No weights are copied,
-nothing is retrained, and the optimizer, losses and weights are untouched.
-The analytical curve and the RMSE are computed only after training. Runs with
-more than 300 snapshots are thinned evenly in the animation to keep the GIF
-small; the static figure always uses the milestone epochs.
+"Epoch N" in the snapshots = weights after N optimizer updates (epoch 0 = the
+untrained network). The training log counts loop iterations instead, so best
+weights logged as "epoch 9915" appear as snapshot epoch 9914. Snapshots store
+only prediction arrays, captured with `model.eval()` + `torch.no_grad()`, and
+never change training.
 
 ## Project structure
 
 ```text
 pinn_ode/
-├── config.py         # ALL settings: physical, simulation, training
-├── main.py           # training loop, evaluation, plots, metrics.json
-├── pinn_model.py     # network class + derivative helper + the two loss terms
-├── physics.py        # parameter validation + analytical solution (validation only)
-├── visualization.py  # training snapshots + animation of the learning process
-├── tests/            # unit tests
-├── requirements.txt  # torch, numpy, matplotlib
-├── README.md         # this file
-└── outputs/          # created when you run main.py
-    ├── solution_comparison.png
-    ├── training_losses.png
-    ├── absolute_error.png
-    ├── physics_residual.png
-    ├── training_snapshots.png   # if ENABLE_TRAINING_VISUALIZATION
-    ├── solution_evolution.gif   # if ENABLE_TRAINING_VISUALIZATION
-    └── metrics.json
+├── config.py              # ALL settings (grouped by purpose)
+├── main.py                # entry point: chooses the mode; Mode A (physics_only)
+├── damping_estimation.py  # Mode B: synthetic data, estimation run, its plots
+├── training.py            # shared: config loading, losses, training loop, evaluation
+├── pinn_model.py          # PINN, TrainableDampingPINN, derivatives, loss terms
+├── physics.py             # parameter checks, SciPy reference solver, linear exact solution
+├── plots.py               # shared plots + metrics.json helpers
+├── visualization.py       # training snapshots + animation
+├── tests/                 # test_pinn_ode.py (linear/visualization), test_duffing.py
+├── requirements.txt       # torch, numpy, matplotlib, scipy
+└── outputs/               # results, one sub-folder per experiment
 ```
 
+Files directly inside `outputs/` (not in a sub-folder) come from runs of the
+older single-experiment version and can be deleted.
+
 ---
+
+> **Sections 1–10 below** explain the PINN method step by step using the
+> simplest case, the linear oscillator $x''+x=0$ (= `NONLINEAR_COEFFICIENT = 0`,
+> `DAMPING_COEFFICIENT = 0`, `TIME_END = 2π`). Everything carries over: the
+> Duffing residual just adds $+\alpha\hat{x}^3$, and Mode B adds the data loss.
 
 ## 1. What is a second-order ODE?
 
@@ -310,7 +377,7 @@ analytical solution.
 
 ## 8. How backpropagation and Adam update the parameters
 
-Each epoch (`train_pinn()` in `main.py`):
+Each epoch (`train_pinn()` in `training.py`):
 
 1. `optimizer.zero_grad()` — clear old gradients (PyTorch adds them up otherwise).
 2. Compute $L_{\text{physics}}$ and $L_{\text{IC}}$ with the **current** weights,
@@ -340,7 +407,7 @@ known function — ordinary regression — and we would learn nothing about
 whether physics alone can determine the solution. Keeping it out of training
 makes the comparison an honest **test**: the network never saw it, so a small
 error means the PINN genuinely solved the ODE. In the code,
-`analytical_solution()` is called only inside `evaluate_pinn()`.
+reference solutions are computed only after training (`run_physics_only()` in `main.py`).
 
 ## 10. Running the project and reading the results
 
@@ -373,18 +440,18 @@ For the default case, good values are roughly MSE < 1e-4 and max error < 1e-2.
 More collocation points do **not** automatically mean better accuracy, so
 compare the metrics.
 
-### Plots in `outputs/`
+### Plots in `outputs/physics_only/`
 
-* **`solution_comparison.png`** — PINN (red dashed) on top of the analytical
+* **`duffing_solution_comparison.png`** — PINN (red dashed) on top of the reference
   solution (black). The title lists the physical parameters. If training
   worked, the two curves are visually indistinguishable.
-* **`training_losses.png`** — loss vs epoch on a log scale. You should see the
+* **`duffing_training_losses.png`** — loss vs epoch on a log scale. You should see the
   IC loss drop very fast (the start point is easy) and the physics loss fall
   more slowly over several orders of magnitude. Small spikes are normal with
   Adam.
 * **`physics_residual.png`** — residual $r(t)$ on the evaluation grid, with a
   zero reference line.
-* **`absolute_error.png`** — $|\hat{x}(t)-x(t)|$, with the maximum marked. The error is usually
+* **`duffing_absolute_error.png`** — $|\hat{x}(t)-x(t)|$, with the maximum marked. The error is usually
   smallest near $t=0$ (anchored by the ICs) and tends to grow with $t$,
   because small errors in the equation accumulate as you move away from the
   initial condition.
