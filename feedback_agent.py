@@ -103,7 +103,8 @@ def agent_input(ode, pinn_settings, summary, attempt):
                     "time_interval": ode["time_interval"],
                     "initial_conditions": ode["initial_conditions"]},
         "current_settings": pinn_settings, "attempt": attempt,
-        "metrics": {k: v for k, v in summary.items() if k not in ("log_file", "plots_folder")},
+        "metrics": {k: v for k, v in summary.items()
+                    if k not in ("log_file", "plots_folder", "data_file")},
         "thresholds": THRESHOLDS,
     }, indent=2)
 

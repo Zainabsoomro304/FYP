@@ -2,3 +2,10 @@ torch>=2.0
 numpy>=1.24
 matplotlib>=3.7
 scipy>=1.10
+# agent backends (the LLM calls in ode_agent.py)
+google-genai>=1.0
+# anthropic>=0.40            # optional: only for the Claude backend
+# web UI (app.py)
+streamlit>=1.40
+pandas>=2.0                # tables in the web UI
+psutil>=5.9                # finds a running worker again after a dashboard restart

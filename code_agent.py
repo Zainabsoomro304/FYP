@@ -117,7 +117,8 @@ def run_spec(spec, run_dir):
     overrides = dict(spec["overrides"], OUTPUT_DIR=os.path.abspath(run_dir))
     log_path = os.path.join(run_dir, "training_log.txt")
     start = time.time()
-    with open(log_path, "w", encoding="utf-8") as log, contextlib.redirect_stdout(log):
+    # buffering=1: each printed line reaches the file at once, so progress can be followed live
+    with open(log_path, "w", encoding="utf-8", buffering=1) as log, contextlib.redirect_stdout(log):
         if spec["mode"] == "physics_only":
             summary = _run_forward(overrides)
         else:
@@ -143,6 +144,7 @@ def _run_forward(overrides):
         "ic_velocity_error": metrics["initial_velocity_error_m_per_s"],
         "best_epoch": report["results"]["best_epoch"],
         "plots_folder": os.path.join(overrides["OUTPUT_DIR"], "physics_only"),
+        "data_file": os.path.join(overrides["OUTPUT_DIR"], "physics_only", "solution_data.npz"),
     }
 
 
@@ -157,7 +159,9 @@ def _run_inverse(overrides, obs, np, torch):
     """
     from damping_estimation import make_known_parameter_config, observations_to_tensors
     from physics import solve_reference_ode
-    from pinn_model import compute_initial_condition_loss, compute_physics_residual
+    from pinn_model import (compute_initial_condition_loss, compute_physics_residual,
+                            predict_with_derivatives)
+    from plots import save_solution_data
     from training import (build_model, compute_training_losses, load_config,
                           make_collocation_points, make_evaluation_points, set_seed,
                           train_pinn)
@@ -168,7 +172,7 @@ def _run_inverse(overrides, obs, np, torch):
     torch.set_default_dtype(torch.float32)
     model = build_model(known, learn_damping=True)
     observations = observations_to_tensors(obs["t"], obs["x"])
-    _, best_epoch, _ = train_pinn(model, known, observations)
+    history, best_epoch, _ = train_pinn(model, known, observations)
 
     c_est = model.damping_coefficient()
     losses = compute_training_losses(model, make_collocation_points(known), known, observations)
@@ -178,11 +182,18 @@ def _run_inverse(overrides, obs, np, torch):
     t_eval = make_evaluation_points(known).reshape(-1, 1).requires_grad_(True)
     residual = compute_physics_residual(model, t_eval, known.MASS, c_est, known.SPRING_CONSTANT,
                                         known.NONLINEAR_COEFFICIENT)
-    x_pred = model(t_eval).detach().numpy().ravel()
-    x_ref, _ = solve_reference_ode(t_eval.detach().numpy().astype(np.float64).ravel(),
-                                   known.MASS, known.SPRING_CONSTANT, float(c_est.item()),
-                                   known.NONLINEAR_COEFFICIENT, known.INITIAL_POSITION,
-                                   known.INITIAL_VELOCITY, known.TIME_START)
+    x_pred_tensor, v_pred, _ = predict_with_derivatives(model, t_eval)
+    x_pred = x_pred_tensor.detach().numpy().ravel()
+    t_np = t_eval.detach().numpy().astype(np.float64).ravel()
+    x_ref, v_ref = solve_reference_ode(t_np, known.MASS, known.SPRING_CONSTANT, float(c_est.item()),
+                                       known.NONLINEAR_COEFFICIENT, known.INITIAL_POSITION,
+                                       known.INITIAL_VELOCITY, known.TIME_START)
+    data_file = save_solution_data(
+        overrides["OUTPUT_DIR"], history, t=t_np, x_pred=x_pred,
+        v_pred=v_pred.detach().numpy().ravel(), x_reference=x_ref, v_reference=v_ref,
+        residual=residual.detach().numpy().ravel(),
+        t_collocation=make_collocation_points(known).detach().numpy().ravel(),
+        t_observed=obs["t"], x_observed=obs["x"])
     return {
         "mode": "inverse",
         "estimated_c": float(c_est.item()),
@@ -194,4 +205,5 @@ def _run_inverse(overrides, obs, np, torch):
         "ic_velocity_error": abs(vel_err.item()),
         "best_epoch": best_epoch,
         "n_observations": len(obs["t"]),
+        "data_file": data_file,
     }

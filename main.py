@@ -30,10 +30,11 @@ import numpy as np
 import torch
 
 from physics import analytical_solution, make_reference_solver
+from pinn_model import predict_with_derivatives
 from plots import (check_metrics_are_finite, describe_system, plot_results, print_metrics,
-                   save_json, settings_summary)
+                   save_json, save_solution_data, settings_summary)
 from training import (EXPERIMENT_MODES, build_model, evaluate_pinn, load_config,
-                      make_evaluation_points, set_seed, train_pinn)
+                      make_collocation_points, make_evaluation_points, set_seed, train_pinn)
 from visualization import create_training_visualizations
 
 
@@ -89,6 +90,16 @@ def run_physics_only(cfg):
     print(f"{'best_epoch':45s} {best_epoch}")
 
     plot_results(t, x_pred, x_reference, residual, history, cfg, subtitle, output_dir)
+
+    # The same curves as numbers (used by the dashboard). Velocities: the PINN's
+    # comes from autograd, the reference's from the SciPy solver.
+    t_tensor = torch.tensor(t, dtype=torch.float32).reshape(-1, 1).requires_grad_(True)
+    _, v_pred, _ = predict_with_derivatives(model, t_tensor)
+    _, v_reference = make_reference_solver(cfg, cfg.DAMPING_COEFFICIENT, with_velocity=True)(t_eval)
+    save_solution_data(output_dir, history, t=t, x_pred=x_pred,
+                       v_pred=v_pred.detach().numpy().ravel(), x_reference=x_reference,
+                       v_reference=v_reference, residual=residual,
+                       t_collocation=make_collocation_points(cfg).detach().numpy().ravel())
 
     visualization_info = {"enabled": False}
     if cfg.ENABLE_TRAINING_VISUALIZATION:

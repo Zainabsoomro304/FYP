@@ -204,17 +204,18 @@ def solve_reference_ode(t_eval, mass, spring_constant, damping_coefficient, nonl
     return x, v
 
 
-def make_reference_solver(cfg, damping_coefficient):
+def make_reference_solver(cfg, damping_coefficient, with_velocity=False):
     """Return a function t -> reference positions x(t), using the settings in cfg.
 
     The damping coefficient is passed explicitly so the caller decides which
     value is meant (the known c in Mode A, the hidden TRUE c in Mode B).
+    with_velocity=True makes the function return (x(t), x'(t)) instead.
     """
     def reference_position(t):
-        x, _ = solve_reference_ode(t, cfg.MASS, cfg.SPRING_CONSTANT, damping_coefficient,
+        x, v = solve_reference_ode(t, cfg.MASS, cfg.SPRING_CONSTANT, damping_coefficient,
                                    cfg.NONLINEAR_COEFFICIENT, cfg.INITIAL_POSITION,
                                    cfg.INITIAL_VELOCITY, cfg.TIME_START,
                                    method=cfg.REFERENCE_SOLVER_METHOD,
                                    rtol=cfg.REFERENCE_RTOL, atol=cfg.REFERENCE_ATOL)
-        return x
+        return (x, v) if with_velocity else x
     return reference_position

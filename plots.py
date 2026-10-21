@@ -187,6 +187,21 @@ def save_json(report, output_dir, filename="metrics.json"):
     return path
 
 
+def save_solution_data(output_dir, history, filename="solution_data.npz", **arrays):
+    """Save the curves behind the plots as numbers (for the dashboard / own analysis).
+
+    arrays: named 1-D arrays (time grid, predictions, reference, residual, ...).
+    history: the training history dict; each list is saved as "history_<name>".
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    data = {name: np.asarray(values, dtype=np.float64) for name, values in arrays.items()}
+    data.update({f"history_{name}": np.asarray(values, dtype=np.float64)
+                 for name, values in history.items()})
+    path = os.path.join(output_dir, filename)
+    np.savez_compressed(path, **data)
+    return path
+
+
 def check_metrics_are_finite(metrics):
     """Raise if any numeric metric is NaN/inf (None is allowed: 'not defined')."""
     for name, value in metrics.items():

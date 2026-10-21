@@ -50,6 +50,99 @@ python -m unittest discover -s tests -v
 The full damping-recovery test (10,000 epochs) is skipped unless you set
 `RUN_SLOW_TESTS=1` (PowerShell: `$env:RUN_SLOW_TESTS = "1"`).
 
+## Web UI: Agentic PINN
+
+A small local web interface for the four-agent pipeline (`run_all.py`). You
+describe an oscillator in plain language, run the agents, watch what each one
+does, and see the resulting plots. The UI has **no solver and no workflow of
+its own**: every run calls `run_all.run_system()`, which uses agents 1–4 and the
+PINN code in this folder.
+
+### Install and launch
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Run both commands inside this folder so `.streamlit/config.toml` (white theme)
+is used. The browser opens at <http://localhost:8501>. `Ctrl+C` stops the server.
+
+### API key
+
+The agents need a language model, configured exactly as for the CLI:
+
+| Model | Environment variable | Package |
+|---|---|---|
+| Gemini | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | `google-genai` |
+| Claude | `ANTHROPIC_API_KEY` | `anthropic` (`pip install anthropic`) |
+
+Set it before launching, e.g. in PowerShell `$env:GEMINI_API_KEY = "your-key"`,
+or put `GEMINI_API_KEY=your-key` in a `.env` file in this folder (`.env` is
+git-ignored). The UI never displays or saves the key. Without a key it shows a
+short configuration message and the Run button stays disabled. It never falls
+back to a scripted stand-in. If both keys are set, a model selector appears
+under *Advanced*. Model names come from `GEMINI_MODEL` / `ODE_MODEL`, as in the CLI.
+
+### Using it
+
+1. **Simulation**: write the problem, or click a suggestion (simple harmonic,
+   damped, Duffing, unknown damping), then press **Run simulation**. *Advanced*
+   holds only the CLI's own options: maximum attempts (`--max-attempts`) and
+   epochs for the first attempt (`--epochs`). Agent 2 chooses everything else.
+2. **Agent Activity**: the four stages with status, a one-line summary of what
+   each agent actually did, runtime, and a collapsed *Details* section. While
+   training runs, a progress bar shows the epochs the training log has reported
+   (code_agent logs every 1,000 epochs, so it moves in those steps). A retry
+   line shows exactly which settings agent 4 changed. *Debug log* holds the
+   pipeline's console output.
+3. **Results** appear under the Run button when an attempt finishes: a few
+   key metrics, then **the plots the project itself saved**, with the PINN vs
+   numerical reference plot first, followed by absolute error, physics
+   residual and training losses. For forward problems these are the PNG files
+   `main.py` writes. The inverse (unknown-damping) path in `code_agent.py`
+   saves no plots, so the same `plots.py` functions draw them from its saved
+   arrays. There, the reference is SciPy solved with the *estimated* c.
+
+A saved run can be reopened with `http://localhost:8501/?run=<folder in agent_runs>`.
+
+### How it connects to the pipeline
+
+```text
+app.py ──start_run()──▶ ui_worker.py (own process)
+                           └─ run_all.run_system(text, llm, out_dir, max_attempts,
+                                                 first_epochs, on_event=EventWriter)
+                           writes agent_runs/ui_<time>/: events.jsonl, run_all_results.json,
+                                  attempt_N/ (training_log.txt, plots, metrics.json, solution_data.npz)
+app.py ◀── reads those files every 3 s
+```
+
+A UI run is the same call as `python run_all.py --backend gemini --text "…"
+--max-attempts N --epochs E`, with the same settings, thread count and seeds.
+The only differences are UI additions that do not touch the computation:
+
+* `run_system()` has an optional `on_event` callback (the CLI passes none). It
+  only reports each step.
+* The solver also saves its curves as `solution_data.npz` next to its plots,
+  and the training log is written line by line so progress can be shown.
+* `code_agent`'s summary gains a `data_file` path, which is kept out of agent
+  4's prompt so the prompt is unchanged.
+
+This was checked by running the original (pre-UI) code and the current code on
+the same forward and inverse problems. All metrics, settings, pass/fail
+decisions, retry changes, console output and plot images were identical.
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| "No language model is configured" | set `GEMINI_API_KEY` or `ANTHROPIC_API_KEY` (see above) and restart |
+| Agent 1 fails with an SSL / connection error | network or API problem, shown exactly as reported. Retry |
+| "agent 3 cannot run this: equation … is not one of the forms" | the model named a term differently (e.g. `beta*x^3`). Call it "nonlinear coefficient alpha" in the text |
+| Agent 1 asks questions | the text is missing information (e.g. initial conditions). Add it and run again |
+| Status *Failed* right after a server restart | the run's worker ended while the server was down; start a new run |
+| Training is slow | set *Epochs for the first attempt* (e.g. 2000) for a quick look; a 10,000-epoch attempt takes several minutes on a CPU |
+
 ## What to edit (all in `config.py`)
 
 | To change… | Edit |
@@ -205,8 +298,18 @@ pinn_ode/
 ├── physics.py             # parameter checks, SciPy reference solver, linear exact solution
 ├── plots.py               # shared plots + metrics.json helpers
 ├── visualization.py       # training snapshots + animation
-├── tests/                 # test_pinn_ode.py (linear/visualization), test_duffing.py
-├── requirements.txt       # torch, numpy, matplotlib, scipy
+├── run_all.py             # the four-agent pipeline (CLI); run_system() also emits UI events
+├── ode_agent.py           # agent 1: text -> ODE JSON (+ the LLM call helper)
+├── pinn_agent.py          # agent 2: ODE JSON -> PINN design
+├── code_agent.py          # agent 3: design -> config.py settings -> training
+├── feedback_agent.py      # agent 4: pass/fail rules + LLM diagnosis + retry changes
+├── app.py                 # web UI (Agentic PINN)
+├── ui_backend.py          # UI <-> pipeline bridge: events, runs, plots, example prompts
+├── ui_worker.py           # runs one pipeline run in its own process for the UI
+├── .streamlit/config.toml # UI theme
+├── tests/                 # test_pinn_ode.py, test_duffing.py, test_ui_backend.py
+├── requirements.txt       # torch, numpy, matplotlib, scipy, google-genai, streamlit, ...
+├── agent_runs/            # one folder per pipeline run (CLI and UI)
 └── outputs/               # results, one sub-folder per experiment
 ```
 
